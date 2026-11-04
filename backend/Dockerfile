@@ -1,4 +1,4 @@
-# Container image for the Django API (built by Google Cloud Build and run on Cloud Run).
+# Container image for the Django API (built and run by Render; also runs on Cloud Run).
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -17,7 +17,7 @@ COPY . .
 RUN useradd --system --uid 10001 --no-create-home app && chown -R app /app
 USER app
 
-# Cloud Run supplies $PORT (8080 by default).
+# The host (Render, Cloud Run) supplies $PORT; 8080 is the fallback.
 ENV PORT=8080
 EXPOSE 8080
 

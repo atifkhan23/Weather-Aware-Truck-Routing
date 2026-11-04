@@ -153,7 +153,7 @@ All three external services are free and need **no API keys**. Every external ca
 ```
 .
 ├── backend/
-│   ├── Dockerfile              # Cloud Run container image
+│   ├── Dockerfile              # container image (Render builds this)
 │   ├── config/                 # Django settings and URLs
 │   └── trips/
 │       ├── services/
@@ -175,7 +175,7 @@ All three external services are free and need **no API keys**. Every external ca
 │   │   ├── components/         # Landing, TripForm, MapView, RouteCard, DirectionsList, NavBanner, ...
 │   │   └── lib/                # API client, types, geometry, directions, layout, GPS hook
 │   └── public/                 # hero image (WebP)
-├── deploy/                     # Cloud Run and Vercel deployment scripts (PowerShell)
+├── deploy/                     # Vercel and optional Cloud Run scripts (PowerShell)
 └── README.md
 ```
 
@@ -291,51 +291,53 @@ Planning against the real OSRM service (32,000 lb, departing in 2 hours):
 
 ## Deployment
 
-The API runs on **Google Cloud Run** and the frontend on **Vercel**. Everything below is already configured in the repo.
+The API runs on **Render** (Docker web service) and the frontend on **Vercel**.
 
 ```
-Browser ──► Vercel (React, static)            VITE_API_URL is baked in at build time
+Browser ──► Vercel (React, static)         VITE_API_URL is baked in at build time
    │
-   └──────► Google Cloud Run (Django API)     CORS_ALLOWED_ORIGINS must include the Vercel address
+   └──────► Render (Django API)            CORS_ALLOWED_ORIGINS must include the Vercel address
                  └─► OSRM, Photon, Open-Meteo (free public services)
 ```
 
-### Backend on Google Cloud Run
-What is configured: `backend/Dockerfile` (Python 3.12, gunicorn, non-root user, listens on `$PORT`), `backend/.dockerignore`, and production-ready settings (HTTPS redirect with the health probe exempt, real client IP behind Google's proxy for rate limiting, secret key from Secret Manager, no debug). The service scales to zero when idle, so light use fits the free tier.
+### Backend on Render
+What is configured: `backend/Dockerfile` (Python 3.12, gunicorn, non-root user, listens on `$PORT`) and production-ready settings (HTTPS redirect with the health probe exempt, real client IP for rate limiting, secret key from the environment, no debug).
 
-Requirements: the [Google Cloud SDK](https://cloud.google.com/sdk/docs/install), `gcloud auth login`, and a Google Cloud project **with billing enabled** (Cloud Run and Cloud Build need it).
+1. Create a **Web Service** from this GitHub repository.
+2. Root Directory `backend`, Runtime **Docker**, Health Check Path `/api/health/`.
+3. Add the environment variables below, then deploy.
 
-```powershell
-.\deploy\deploy-backend.ps1 -ProjectId <your-gcp-project>
-```
+| Key | Value |
+|---|---|
+| `DJANGO_DEBUG` | `0` |
+| `DJANGO_SECRET_KEY` | a long random string |
+| `DJANGO_ALLOWED_HOSTS` | `.onrender.com` |
+| `DJANGO_SECURE_SSL_REDIRECT` | `1` |
+| `NUM_PROXIES` | `1` |
+| `CORS_ALLOWED_ORIGINS` | the Vercel address, for example `https://your-site.vercel.app` |
 
-The script enables the needed APIs, creates the Django secret key in Secret Manager (first run only), builds the image with Cloud Build, deploys to Cloud Run (512 MiB, 0 to 3 instances, public access) and runs a health check. It prints the API URL, for example `https://weather-aware-truck-routing-api-123456.us-central1.run.app`. Re-running it updates the service in place.
+The free instance sleeps after about 15 minutes idle, so the first request after a pause takes 30 to 60 seconds.
 
 ### Frontend on Vercel
 `frontend/vercel.json` already sets the build, the single-page rewrite and the security headers (including a Content-Security-Policy that allows calls to any https API and a Permissions-Policy that allows the site's own geolocation).
 
+Import the repo in the Vercel dashboard: set the root directory to `frontend` and add the environment variable `VITE_API_URL` set to the Render address. Or use the CLI:
+
 ```powershell
 npx vercel login                                   # first time only
-.\deploy\deploy-frontend.ps1 -ApiUrl <cloud-run-url>
+.\deploy\deploy-frontend.ps1 -ApiUrl <render-url>
 ```
 
-This builds the site with `VITE_API_URL` set to the API URL and deploys it to production. (You can also import the repo in the Vercel dashboard instead: set the root directory to `frontend` and add the environment variable `VITE_API_URL`.)
+The API address is baked in at build time, so redeploy the frontend if it ever changes.
 
 ### Connect them (CORS)
-The browser only lets the Vercel site call the API if the API allows that origin:
-
-```powershell
-.\deploy\set-cors.ps1 -ProjectId <your-gcp-project> -FrontendUrl https://<your-site>.vercel.app
-```
-
-This updates `CORS_ALLOWED_ORIGINS` on the running service (no rebuild). Pass several addresses separated by commas to allow a custom domain as well. Preview deployments on other `*.vercel.app` addresses are not allowed unless you add them.
+The browser only lets the Vercel site call the API if the API allows that origin. Set `CORS_ALLOWED_ORIGINS` on Render to the exact Vercel address (no trailing slash, no path). Separate several addresses with commas to allow a custom domain as well. Preview deployments on other `*.vercel.app` addresses are not allowed unless you add them.
 
 ### Notes
-- **HTTPS is required** for GPS features; Vercel and Cloud Run both provide it.
+- **HTTPS is required** for GPS features; Vercel and Render both provide it.
 - Leave `WEATHER_SCENARIO` unset in production. It is ignored when `DJANGO_DEBUG` is off.
-- The cache is per instance (in memory). That is fine for this app; set `REDIS_URL` (for example a Memorystore instance) if you want a shared cache across instances.
-- Cost: Cloud Run, Cloud Build and Secret Manager have free tiers that cover light use, but the project needs billing enabled. Set a budget alert in the Cloud console if you want a safety net.
-- View logs with `gcloud run services logs read weather-aware-truck-routing-api --region us-central1`.
+- The cache is per instance (in memory). That is fine for this app; set `REDIS_URL` if you want a shared cache across instances.
+- `deploy/deploy-backend.ps1` and `deploy/set-cors.ps1` are an alternative for Google Cloud Run and are not needed for Render.
 
 ### Environment variables
 
@@ -348,7 +350,7 @@ This updates `CORS_ALLOWED_ORIGINS` on the running service (no rebuild). Pass se
 | `HTTP_USER_AGENT` | backend | Identifies the app to the free public APIs |
 | `OSRM_BASE_URL`, `OPEN_METEO_BASE_URL`, `PHOTON_BASE_URL` | backend | Override the free public services |
 | `REDIS_URL` | backend | Optional shared cache for multiple instances |
-| `NUM_PROXIES` | backend | Trusted proxies in front of the app (the deploy script sets 1 on Cloud Run) so rate limits use each visitor's real IP |
+| `NUM_PROXIES` | backend | Trusted proxies in front of the app (set to 1 on Render) so rate limits use each visitor's real IP |
 | `DJANGO_SECURE_SSL_REDIRECT` | backend | `1` in production (default); the health probe is exempt |
 | `WEATHER_SCENARIO` | backend | **Dev only.** `storm` turns on the simulated storm when `DJANGO_DEBUG=1` |
 | `WEATHER_STORM_PEAK_MPH` | backend | Dev only. Storm peak wind, default 42 |
